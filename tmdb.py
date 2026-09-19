@@ -9,7 +9,7 @@ async def search_multi(query: str, page: int = 1) -> dict:
         "query": query,
         "page": page,
         "language": "ru-RU",
-        "include_adult": False,
+        "include_adult": "false",
     }
     async with aiohttp.ClientSession() as session:
         async with session.get(url, params=params) as resp:
