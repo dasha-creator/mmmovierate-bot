@@ -1,18 +1,18 @@
 from aiogram import Router, F, Bot
-from aiogram.types import Message, CallbackQuery, InlineQueryResultArticle, InputTextMessageContent
-from aiogram.filters import CommandStart, Command
+from aiogram.types import Message, CallbackQuery
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy import select, delete
 from datetime import datetime
-import hashlib
+import random
 
 from database import async_session, User, UserMovie, Recommendation
 from tmdb import search_multi, get_details, format_media_type
 from keyboards import (
     main_menu_kb, search_results_kb, movie_action_kb,
     rating_kb, watchlist_item_kb, watched_item_kb,
-    recommendation_kb
+    recommendation_kb, friends_list_kb
 )
 from config import TMDB_IMAGE_BASE
 
@@ -20,12 +20,7 @@ router = Router()
 
 
 class SearchState(StatesGroup):
-    waiting_for_query = State()
     last_results = State()
-    recommend_tmdb_id = State()
-    recommend_media_type = State()
-    recommend_title = State()
-    recommend_poster = State()
 
 
 # ─── helpers ───────────────────────────────────────────────
@@ -56,6 +51,29 @@ async def get_user_movie(user_id: int, tmdb_id: int, media_type: str):
             )
         )
         return result.scalar_one_or_none()
+
+
+async def get_friends(user_id: int) -> list:
+    """Получить список друзей — те кто пришёл по реферальной ссылке или кого пригласил ты"""
+    async with async_session() as session:
+        # Те кого пригласил я
+        invited = await session.execute(
+            select(User).where(User.invited_by == user_id)
+        )
+        friends = list(invited.scalars().all())
+
+        # Тот кто пригласил меня
+        me = await session.execute(select(User).where(User.telegram_id == user_id))
+        me_user = me.scalar_one_or_none()
+        if me_user and me_user.invited_by:
+            inviter = await session.execute(
+                select(User).where(User.telegram_id == me_user.invited_by)
+            )
+            inviter_user = inviter.scalar_one_or_none()
+            if inviter_user and inviter_user not in friends:
+                friends.append(inviter_user)
+
+    return friends
 
 
 def rating_to_emoji(rating: int) -> str:
@@ -96,6 +114,7 @@ def format_card_text(details: dict) -> str:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
     args = message.text.split()
     invited_by = None
     if len(args) > 1 and args[1].startswith("inv_"):
@@ -121,23 +140,22 @@ async def cmd_start(message: Message, state: FSMContext):
     )
 
 
-# ─── SEARCH ────────────────────────────────────────────────
+# ─── SEARCH — любой текст ──────────────────────────────────
 
 @router.message(F.text == "🔍 Найти")
 async def ask_search(message: Message, state: FSMContext):
-    await state.set_state(SearchState.waiting_for_query)
-    await message.answer("Введи название фильма, сериала или аниме 👇", reply_markup=main_menu_kb())
+    await state.clear()
+    await message.answer("Введи название фильма, сериала или аниме 👇")
 
 
-@router.message(SearchState.waiting_for_query)
-async def do_search(message: Message, state: FSMContext):
+@router.message(F.text.regexp(r'^(?!🔍|📋|✅|📬|👤|🔗|🎲).+'))
+async def auto_search(message: Message, state: FSMContext):
+    """Любой текст не начинающийся с кнопки — ищем"""
     query = message.text.strip()
-    if not query:
+    if len(query) < 2:
         return
 
-    await state.clear()
     msg = await message.answer("🔍 Ищу...")
-
     data = await search_multi(query)
     results = data["results"]
 
@@ -161,7 +179,6 @@ async def show_detail(callback: CallbackQuery, state: FSMContext):
     tmdb_id = int(tmdb_id)
 
     await callback.answer()
-    await callback.message.answer("⏳ Загружаю...")
 
     details = await get_details(tmdb_id, media_type)
     user_movie = await get_user_movie(callback.from_user.id, tmdb_id, media_type)
@@ -170,7 +187,6 @@ async def show_detail(callback: CallbackQuery, state: FSMContext):
     is_in_watchlist = user_movie and user_movie.status == "watchlist"
 
     text = format_card_text(details)
-
     kb = movie_action_kb(tmdb_id, media_type, is_in_watchlist=is_in_watchlist, is_watched=is_watched)
 
     if details["poster_url"]:
@@ -187,7 +203,7 @@ async def show_detail(callback: CallbackQuery, state: FSMContext):
 # ─── WATCHLIST ─────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("watchlist:"))
-async def add_to_watchlist(callback: CallbackQuery, state: FSMContext):
+async def add_to_watchlist(callback: CallbackQuery):
     _, media_type, tmdb_id = callback.data.split(":")
     tmdb_id = int(tmdb_id)
 
@@ -201,6 +217,7 @@ async def add_to_watchlist(callback: CallbackQuery, state: FSMContext):
                 return
             existing.status = "watchlist"
             existing.rating = None
+            await session.merge(existing)
         else:
             movie = UserMovie(
                 user_telegram_id=callback.from_user.id,
@@ -219,7 +236,7 @@ async def add_to_watchlist(callback: CallbackQuery, state: FSMContext):
 # ─── WATCHED ───────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("watched:"))
-async def mark_watched(callback: CallbackQuery, state: FSMContext):
+async def mark_watched(callback: CallbackQuery):
     _, media_type, tmdb_id = callback.data.split(":")
     tmdb_id = int(tmdb_id)
 
@@ -230,6 +247,7 @@ async def mark_watched(callback: CallbackQuery, state: FSMContext):
         if existing:
             existing.status = "watched"
             existing.watched_at = datetime.utcnow()
+            await session.merge(existing)
         else:
             movie = UserMovie(
                 user_telegram_id=callback.from_user.id,
@@ -245,7 +263,7 @@ async def mark_watched(callback: CallbackQuery, state: FSMContext):
 
     await callback.answer("✅ Отмечено как просмотренное!")
     await callback.message.answer(
-        f"Отлично! Как оцениваешь <b>{details['title']}</b>?",
+        f"Как оцениваешь <b>{details['title']}</b>?",
         reply_markup=rating_kb(tmdb_id, media_type),
         parse_mode="HTML",
     )
@@ -268,7 +286,6 @@ async def set_rating(callback: CallbackQuery):
     _, media_type, tmdb_id, score = callback.data.split(":")
     tmdb_id = int(tmdb_id)
     score = int(score)
-
     emoji = rating_to_emoji(score)
 
     async with async_session() as session:
@@ -308,16 +325,14 @@ async def show_watchlist(message: Message):
         movies = result.scalars().all()
 
     if not movies:
-        await message.answer("Список пуст 😴 Найди что-нибудь через 🔍")
+        await message.answer("Список пуст 😴 Напиши название фильма чтобы найти что-нибудь!")
         return
 
-    await message.answer(f"📋 <b>Хочу посмотреть</b> — {len(movies)} шт.\n\nВот твой список:", parse_mode="HTML")
+    await message.answer(f"📋 <b>Хочу посмотреть</b> — {len(movies)} шт.", parse_mode="HTML")
 
     for m in movies[:15]:
         icon = "🎬" if m.media_type == "movie" else "📺"
         text = f"{icon} <b>{m.title}</b>"
-        if m.recommended_by:
-            text += "\n👤 <i>Кто-то посоветовал</i>"
 
         if m.poster_path:
             await message.answer_photo(
@@ -363,6 +378,43 @@ async def show_watched(message: Message):
             await message.answer(text, reply_markup=watched_item_kb(m.tmdb_id, m.media_type), parse_mode="HTML")
 
 
+# ─── RANDOM ────────────────────────────────────────────────
+
+@router.message(F.text == "🎲 Рандомный")
+async def random_movie(message: Message):
+    async with async_session() as session:
+        result = await session.execute(
+            select(UserMovie).where(
+                UserMovie.user_telegram_id == message.from_user.id,
+                UserMovie.status == "watchlist",
+            )
+        )
+        watchlist = result.scalars().all()
+
+    if not watchlist:
+        await message.answer(
+            "В твоём списке желаний пусто 😔\n"
+            "Сначала добавь что-нибудь через поиск!"
+        )
+        return
+
+    pick = random.choice(watchlist)
+    details = await get_details(pick.tmdb_id, pick.media_type)
+    text = f"🎲 <b>Сегодня смотришь:</b>\n\n" + format_card_text(details)
+
+    kb = movie_action_kb(pick.tmdb_id, pick.media_type, is_in_watchlist=True)
+
+    if details["poster_url"]:
+        await message.answer_photo(
+            photo=details["poster_url"],
+            caption=text,
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+
 # ─── REMOVE ────────────────────────────────────────────────
 
 @router.callback_query(F.data.startswith("remove:"))
@@ -387,36 +439,84 @@ async def remove_movie(callback: CallbackQuery):
         pass
 
 
-# ─── RECOMMEND ─────────────────────────────────────────────
+# ─── RECOMMEND — выбор друга ───────────────────────────────
 
 @router.callback_query(F.data.startswith("recommend:"))
-async def start_recommend(callback: CallbackQuery, state: FSMContext):
+async def start_recommend(callback: CallbackQuery):
     _, media_type, tmdb_id = callback.data.split(":")
     tmdb_id = int(tmdb_id)
 
-    details = await get_details(tmdb_id, media_type)
-
-    await state.update_data(
-        recommend_tmdb_id=tmdb_id,
-        recommend_media_type=media_type,
-        recommend_title=details["title"],
-        recommend_poster=details["poster_path"],
-    )
-
+    friends = await get_friends(callback.from_user.id)
     await callback.answer()
+
+    if not friends:
+        bot_info = await callback.bot.get_me()
+        invite_link = f"https://t.me/{bot_info.username}?start=inv_{callback.from_user.id}"
+        await callback.message.answer(
+            "У тебя пока нет друзей в боте 😔\n\n"
+            "Поделись ссылкой — когда друг зайдёт, сможешь советовать ему фильмы:\n\n"
+            f"<code>{invite_link}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    details = await get_details(tmdb_id, media_type)
     await callback.message.answer(
-        f"📤 Хочешь посоветовать <b>{details['title']}</b> другу?\n\n"
-        "Перешли любое сообщение от друга, которому хочешь посоветовать — "
-        "или попроси его написать боту /start и поделись ссылкой ниже.",
+        f"Кому посоветовать <b>{details['title']}</b>? 👇",
+        reply_markup=friends_list_kb(friends, tmdb_id, media_type),
         parse_mode="HTML",
     )
 
-    bot_info = await callback.bot.get_me()
-    user_id = callback.from_user.id
-    invite_link = f"https://t.me/{bot_info.username}?start=inv_{user_id}"
-    await callback.message.answer(
-        f"🔗 Твоя ссылка-приглашение:\n{invite_link}\n\n"
-        "Когда друг зарегистрируется — найди фильм снова и советуй через кнопку 📤"
+
+@router.callback_query(F.data.startswith("send_rec:"))
+async def send_recommendation(callback: CallbackQuery):
+    # send_rec:media_type:tmdb_id:to_user_id
+    parts = callback.data.split(":")
+    media_type = parts[1]
+    tmdb_id = int(parts[2])
+    to_user_id = int(parts[3])
+
+    details = await get_details(tmdb_id, media_type)
+
+    async with async_session() as session:
+        rec = Recommendation(
+            from_telegram_id=callback.from_user.id,
+            to_telegram_id=to_user_id,
+            tmdb_id=tmdb_id,
+            media_type=media_type,
+            title=details["title"],
+            poster_path=details["poster_path"],
+        )
+        session.add(rec)
+        await session.commit()
+        rec_id = rec.id
+
+    # Уведомляем получателя
+    from_name = callback.from_user.first_name or "Кто-то"
+    try:
+        text = f"📬 <b>{from_name}</b> советует тебе посмотреть:\n\n<b>{details['title']}</b>"
+        if details["poster_url"]:
+            await callback.bot.send_photo(
+                chat_id=to_user_id,
+                photo=details["poster_url"],
+                caption=text,
+                reply_markup=recommendation_kb(tmdb_id, media_type, rec_id),
+                parse_mode="HTML",
+            )
+        else:
+            await callback.bot.send_message(
+                chat_id=to_user_id,
+                text=text,
+                reply_markup=recommendation_kb(tmdb_id, media_type, rec_id),
+                parse_mode="HTML",
+            )
+    except Exception:
+        pass
+
+    await callback.answer("📤 Отправлено!")
+    await callback.message.edit_text(
+        f"✅ Совет отправлен!",
+        parse_mode="HTML",
     )
 
 
@@ -436,31 +536,24 @@ async def show_inbox(message: Message):
         await message.answer("Тебе пока ничего не советовали 📭\nПригласи друзей!")
         return
 
-    new = [r for r in recs if not r.seen]
-    old = [r for r in recs if r.seen]
-
+    new_count = len([r for r in recs if not r.seen])
     await message.answer(
-        f"📬 <b>Советы от друзей</b>\n\n"
-        f"🆕 Новые: {len(new)}\n"
-        f"📖 Прочитанные: {len(old)}",
+        f"📬 <b>Советы от друзей</b>\n🆕 Новых: {new_count}",
         parse_mode="HTML",
     )
 
     for rec in recs[:10]:
         icon = "🎬" if rec.media_type == "movie" else "📺"
         seen_mark = "" if not rec.seen else "✓ "
-        text = f"{seen_mark}{icon} <b>{rec.title}</b>"
-        if rec.message:
-            text += f"\n💬 «{rec.message}»"
 
         async with async_session() as session2:
             sender_result = await session2.execute(
                 select(User).where(User.telegram_id == rec.from_telegram_id)
             )
             sender = sender_result.scalar_one_or_none()
-            if sender:
-                sender_name = sender.first_name or sender.username or "Друг"
-                text += f"\n👤 от {sender_name}"
+            sender_name = sender.first_name if sender else "Друг"
+
+        text = f"{seen_mark}{icon} <b>{rec.title}</b>\n👤 от {sender_name}"
 
         if rec.poster_path:
             await message.answer_photo(
@@ -470,11 +563,7 @@ async def show_inbox(message: Message):
                 parse_mode="HTML",
             )
         else:
-            await message.answer(
-                text,
-                reply_markup=recommendation_kb(rec.tmdb_id, rec.media_type, rec.id),
-                parse_mode="HTML",
-            )
+            await message.answer(text, reply_markup=recommendation_kb(rec.tmdb_id, rec.media_type, rec.id), parse_mode="HTML")
 
 
 @router.callback_query(F.data.startswith("seen_rec:"))
@@ -489,6 +578,33 @@ async def mark_rec_seen(callback: CallbackQuery):
     await callback.answer("✔️ Отмечено!")
 
 
+# ─── FRIENDS ───────────────────────────────────────────────
+
+@router.message(F.text == "👥 Друзья")
+async def show_friends(message: Message):
+    friends = await get_friends(message.from_user.id)
+    bot_info = await message.bot.get_me()
+    invite_link = f"https://t.me/{bot_info.username}?start=inv_{message.from_user.id}"
+
+    if not friends:
+        await message.answer(
+            "У тебя пока нет друзей в боте 😔\n\n"
+            "Поделись ссылкой чтобы пригласить:\n\n"
+            f"<code>{invite_link}</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    text = f"👥 <b>Твои друзья в боте</b> — {len(friends)} чел.\n\n"
+    for f in friends:
+        name = f.first_name or "Аноним"
+        username = f"@{f.username}" if f.username else ""
+        text += f"• {name} {username}\n"
+
+    text += f"\n🔗 Пригласить ещё:\n<code>{invite_link}</code>"
+    await message.answer(text, parse_mode="HTML")
+
+
 # ─── PROFILE ───────────────────────────────────────────────
 
 @router.message(F.text == "👤 Мой профиль")
@@ -497,18 +613,12 @@ async def show_profile(message: Message):
 
     async with async_session() as session:
         watched_result = await session.execute(
-            select(UserMovie).where(
-                UserMovie.user_telegram_id == user_id,
-                UserMovie.status == "watched",
-            )
+            select(UserMovie).where(UserMovie.user_telegram_id == user_id, UserMovie.status == "watched")
         )
         watched = watched_result.scalars().all()
 
         watchlist_result = await session.execute(
-            select(UserMovie).where(
-                UserMovie.user_telegram_id == user_id,
-                UserMovie.status == "watchlist",
-            )
+            select(UserMovie).where(UserMovie.user_telegram_id == user_id, UserMovie.status == "watchlist")
         )
         watchlist = watchlist_result.scalars().all()
 
@@ -517,6 +627,7 @@ async def show_profile(message: Message):
         )
         recs_sent = recs_sent_result.scalars().all()
 
+    friends = await get_friends(user_id)
     rated = [m for m in watched if m.rating]
     avg_rating = round(sum(m.rating for m in rated) / len(rated), 1) if rated else None
 
@@ -527,6 +638,7 @@ async def show_profile(message: Message):
         f"👤 <b>{name}</b> {username}\n\n"
         f"✅ Посмотрел(а): <b>{len(watched)}</b>\n"
         f"📋 Хочу посмотреть: <b>{len(watchlist)}</b>\n"
+        f"👥 Друзей в боте: <b>{len(friends)}</b>\n"
         f"📤 Советов отдал(а): <b>{len(recs_sent)}</b>\n"
     )
     if avg_rating:
@@ -546,13 +658,11 @@ async def show_profile(message: Message):
 @router.message(F.text == "🔗 Пригласить друга")
 async def invite_friend(message: Message):
     bot_info = await message.bot.get_me()
-    user_id = message.from_user.id
-    invite_link = f"https://t.me/{bot_info.username}?start=inv_{user_id}"
-
+    invite_link = f"https://t.me/{bot_info.username}?start=inv_{message.from_user.id}"
     await message.answer(
-        f"🔗 Поделись этой ссылкой с другом:\n\n"
+        f"🔗 Поделись ссылкой с другом:\n\n"
         f"<code>{invite_link}</code>\n\n"
-        "Когда он зайдёт в бота — вы сможете советовать друг другу фильмы 🍿",
+        "Когда он зайдёт — появится в списке друзей и ты сможешь советовать ему фильмы 🍿",
         parse_mode="HTML",
     )
 
@@ -563,13 +673,11 @@ async def invite_friend(message: Message):
 async def noop(callback: CallbackQuery):
     await callback.answer()
 
-
 @router.callback_query(F.data == "cancel")
 async def cancel(callback: CallbackQuery):
     await callback.answer("Отменено")
 
-
 @router.callback_query(F.data == "back_to_search")
 async def back_to_search(callback: CallbackQuery):
     await callback.answer()
-    await callback.message.answer("Введи новый запрос для поиска 🔍", reply_markup=main_menu_kb())
+    await callback.message.answer("Напиши название фильма для поиска 🔍")
