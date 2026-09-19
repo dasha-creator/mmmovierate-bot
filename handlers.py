@@ -54,24 +54,44 @@ async def get_user_movie(user_id: int, tmdb_id: int, media_type: str):
 
 
 async def get_friends(user_id: int) -> list:
-    """Получить список друзей — те кто пришёл по реферальной ссылке или кого пригласил ты"""
-    async with async_session() as session:
-        # Те кого пригласил я
-        invited = await session.execute(
-            select(User).where(User.invited_by == user_id)
-        )
-        friends = list(invited.scalars().all())
+    """Друзья = те кто пришёл по реферальной ссылке + те кому я советовал/кто советовал мне"""
+    friend_ids = set()
 
-        # Тот кто пригласил меня
+    async with async_session() as session:
+        # 1. Те кого я пригласил
+        invited = await session.execute(select(User).where(User.invited_by == user_id))
+        for u in invited.scalars().all():
+            friend_ids.add(u.telegram_id)
+
+        # 2. Тот кто пригласил меня
         me = await session.execute(select(User).where(User.telegram_id == user_id))
         me_user = me.scalar_one_or_none()
         if me_user and me_user.invited_by:
-            inviter = await session.execute(
-                select(User).where(User.telegram_id == me_user.invited_by)
-            )
-            inviter_user = inviter.scalar_one_or_none()
-            if inviter_user and inviter_user not in friends:
-                friends.append(inviter_user)
+            friend_ids.add(me_user.invited_by)
+
+        # 3. Те кому я советовал фильмы
+        sent = await session.execute(
+            select(Recommendation.to_telegram_id).where(Recommendation.from_telegram_id == user_id)
+        )
+        for tid in sent.scalars().all():
+            friend_ids.add(tid)
+
+        # 4. Те кто советовал мне
+        received = await session.execute(
+            select(Recommendation.from_telegram_id).where(Recommendation.to_telegram_id == user_id)
+        )
+        for tid in received.scalars().all():
+            friend_ids.add(tid)
+
+        friend_ids.discard(user_id)
+
+        # Загружаем юзеров
+        friends = []
+        for fid in friend_ids:
+            res = await session.execute(select(User).where(User.telegram_id == fid))
+            u = res.scalar_one_or_none()
+            if u:
+                friends.append(u)
 
     return friends
 
