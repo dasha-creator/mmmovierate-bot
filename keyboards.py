@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
@@ -6,12 +6,23 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🔍 Найти"), KeyboardButton(text="🎲 Рандомный")],
-            [KeyboardButton(text="📋 Хочу посмотреть"), KeyboardButton(text="✅ Смотрел(а)")],
-            [KeyboardButton(text="📬 Мне советуют"), KeyboardButton(text="👥 Друзья")],
-            [KeyboardButton(text="👤 Мой профиль"), KeyboardButton(text="🔗 Пригласить друга")],
+            [KeyboardButton(text="📋 Мой список"), KeyboardButton(text="📬 Мне советуют")],
+            [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🔗 Пригласить друга")],
         ],
         resize_keyboard=True,
     )
+
+
+def back_menu_kb() -> ReplyKeyboardMarkup:
+    """Минимальная клавиатура когда внутри списка/карточки"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🏠 Главное меню")]],
+        resize_keyboard=True,
+    )
+
+
+def remove_kb() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove()
 
 
 def search_results_kb(results: list) -> InlineKeyboardMarkup:
@@ -41,7 +52,6 @@ def movie_action_kb(tmdb_id: int, media_type: str, is_in_watchlist: bool = False
         builder.button(text="✅ Уже смотрел(а)", callback_data=f"watched:{media_type}:{tmdb_id}")
 
     builder.button(text="📤 Посоветовать другу", callback_data=f"recommend:{media_type}:{tmdb_id}")
-    builder.button(text="🔙 К результатам", callback_data="back_to_search")
     builder.adjust(1)
     return builder.as_markup()
 
@@ -53,6 +63,17 @@ def rating_kb(tmdb_id: int, media_type: str) -> InlineKeyboardMarkup:
     for emoji, score in items:
         builder.button(text=f"{emoji} {score}", callback_data=f"setrating:{media_type}:{tmdb_id}:{score}")
     builder.adjust(5)
+    return builder.as_markup()
+
+
+def mylist_tabs_kb(active: str) -> InlineKeyboardMarkup:
+    """Переключатель вкладок в моём списке"""
+    builder = InlineKeyboardBuilder()
+    watchlist_mark = "● " if active == "watchlist" else ""
+    watched_mark = "● " if active == "watched" else ""
+    builder.button(text=f"{watchlist_mark}📋 Хочу посмотреть", callback_data="mylist:watchlist")
+    builder.button(text=f"{watched_mark}✅ Смотрел(а)", callback_data="mylist:watched")
+    builder.adjust(2)
     return builder.as_markup()
 
 
@@ -90,8 +111,8 @@ def friends_list_kb(friends: list, tmdb_id: int, media_type: str) -> InlineKeybo
 
 def recommendation_kb(tmdb_id: int, media_type: str, rec_id: int) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
-    builder.button(text="❤️ В список желаний", callback_data=f"watchlist:{media_type}:{tmdb_id}")
+    builder.button(text="❤️ Хочу посмотреть", callback_data=f"watchlist:{media_type}:{tmdb_id}")
     builder.button(text="✅ Уже смотрел(а)", callback_data=f"watched:{media_type}:{tmdb_id}")
-    builder.button(text="✔️ Отметить прочитанным", callback_data=f"seen_rec:{rec_id}")
+    builder.button(text="✔️ Прочитано", callback_data=f"seen_rec:{rec_id}")
     builder.adjust(1)
     return builder.as_markup()

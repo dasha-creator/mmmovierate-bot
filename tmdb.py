@@ -82,3 +82,21 @@ async def get_details(tmdb_id: int, media_type: str) -> dict:
 
 def format_media_type(media_type: str) -> str:
     return "🎬 Фильм" if media_type == "movie" else "📺 Сериал / Аниме"
+
+
+async def get_popular() -> list:
+    """Популярные фильмы для рандомного когда вишлист пустой"""
+    url = f"{TMDB_BASE_URL}/movie/popular"
+    params = {"api_key": TMDB_API_KEY, "language": "ru-RU", "page": 1}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, params=params) as resp:
+            data = await resp.json()
+    results = []
+    for item in data.get("results", [])[:20]:
+        results.append({
+            "tmdb_id": item["id"],
+            "media_type": "movie",
+            "title": item.get("title", ""),
+            "poster_path": item.get("poster_path"),
+        })
+    return results
