@@ -182,11 +182,13 @@ async def auto_search(message: Message, state: FSMContext):
     results = data["results"]
 
     if not results:
-        await msg.edit_text("Ничего не нашла 😔 Попробуй другой запрос")
+        await msg.delete()
+        await message.answer("Ничего не нашла 😔 Попробуй другой запрос")
         return
 
     await state.update_data(last_results=results)
-    await msg.edit_text(
+    await msg.delete()
+    await message.answer(
         f"Нашла <b>{len(results)}</b> вариантов — выбирай 👇",
         reply_markup=search_results_kb(results),
         parse_mode="HTML",
