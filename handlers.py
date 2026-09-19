@@ -38,7 +38,12 @@ async def get_or_create_user(telegram_id, username, first_name, invited_by=None)
             user = User(telegram_id=telegram_id, username=username,
                         first_name=first_name, invited_by=invited_by)
             session.add(user)
-            await session.commit()
+        else:
+            # Обновляем invited_by если пришли по реферальной ссылке
+            # и связь ещё не была установлена
+            if invited_by and not user.invited_by and invited_by != telegram_id:
+                user.invited_by = invited_by
+        await session.commit()
         return user
 
 
