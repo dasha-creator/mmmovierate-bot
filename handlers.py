@@ -178,16 +178,28 @@ async def ask_search(message: Message):
 async def auto_search(message: Message, state: FSMContext):
     query = message.text.strip()
     msg = await message.answer("🔍 Ищу...", reply_markup=back_menu_kb())
-    data = await search_multi(query)
-    results = data["results"]
+    try:
+        data = await search_multi(query)
+        results = data["results"]
+    except Exception as e:
+        print(f"Search error: {e}")
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        await message.answer("Ошибка поиска 😔 Попробуй ещё раз")
+        return
+
+    try:
+        await msg.delete()
+    except Exception:
+        pass
 
     if not results:
-        await msg.delete()
         await message.answer("Ничего не нашла 😔 Попробуй другой запрос")
         return
 
     await state.update_data(last_results=results)
-    await msg.delete()
     await message.answer(
         f"Нашла <b>{len(results)}</b> вариантов — выбирай 👇",
         reply_markup=search_results_kb(results),
